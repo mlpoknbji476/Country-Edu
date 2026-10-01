@@ -1,0 +1,105 @@
+# Ransomware Detection & Recovery in Hybrid Infrastructure
+### Cyber Security — Incident Response Case Study
+
+## Scenario Summary
+
+A shared file server supporting multiple business services shows signs of active ransomware encryption: a spike in file renames, high disk write rates, and a suspicious process (`encryptsvc.exe --threads=32`). Logs show privilege escalation on the `svc-backup-admin` account, deleted shadow copies, SMB traffic surges, lateral authentication attempts, and suspicious PowerShell activity. Backups exist but their integrity is unconfirmed.
+
+## Key Constraints
+
+- File server supports critical business operations — cannot be taken fully offline
+- Cannot fully disconnect from the network
+- IAM system must remain online throughout the response
+- Possible insider credential misuse is in scope
+- Encryption is actively spreading laterally
+- Management wants live recovery, not a full rebuild
+- A regulatory reporting window is active
+
+## Operational Priorities
+
+The response is sequenced to balance three competing goals: stopping the spread, preserving forensic evidence, and keeping critical business systems running. The core tradeoff throughout is **speed of containment vs. forensic value vs. business continuity** — no single action fully satisfies all three.
+
+| # | Priority | Goal |
+|---|----------|------|
+| 1 | **Stop the bleeding** | Contain the spread of encryption without shutting down services the business depends on. |
+| 2 | **Preserve evidence** | Capture memory, disk, and log state before remediation actions destroy forensic artifacts. |
+| 3 | **Investigate root cause** | Determine how `svc-backup-admin` was compromised and trace lateral movement. |
+| 4 | **Verify before restoring** | Confirm backup integrity so recovery doesn't reintroduce the threat. |
+| 5 | **Recover clean, then harden** | Restore service safely and close the gaps that enabled the incident. |
+
+---
+
+## 1. Immediate Containment Actions
+
+- Isolate the affected host at the network layer (host-based firewall rules or switch-port ACLs) rather than pulling the plug — block outbound SMB (445), RDP (3389), and WinRM while keeping the host reachable for forensics and admin access.
+- Do not power off the machine — RAM holds encryption keys, active connections, and process artifacts needed for investigation.
+- Suspend (not delete) the `svc-backup-admin` account immediately and force logoff of active sessions.
+- Snapshot the VM, if virtualized, for a point-in-time forensic copy before further action.
+
+## 2. Stopping Encryption Without Killing Business Systems
+
+- Kill the specific process tree (`encryptsvc.exe`) via EDR/remote response tooling rather than a full host shutdown, preserving other running services.
+- Use network segmentation (VLAN quarantine / dynamic ACL) instead of full disconnection to stop lateral SMB spread while satisfying the "cannot fully disconnect" constraint.
+- Rate-limit or block SMB traffic between segments at the switch/firewall level, since ransomware commonly propagates via SMB.
+- Keep IAM online but place it in heightened monitoring / read-only mode for privilege changes, given the active credential abuse.
+
+> **Tradeoff:** Targeted containment is slower to fully stop the spread than a full shutdown, but it keeps critical business operations alive — an acceptable tradeoff given the stated constraints.
+
+## 3. Credential Abuse Investigation
+
+- Pull authentication logs for `svc-backup-admin`: source IPs, logon types (4624/4625), timestamps, correlated against the privilege escalation event.
+- Determine if this is a service account normally used for automated backups — interactive logons or logons from an unusual host are strong compromise indicators.
+- Review recent password changes, Kerberos ticket anomalies (Golden/Silver ticket indicators), and newly added group memberships.
+- Check EDR telemetry around the escalation timestamp for credential-dumping tool behavior (e.g., Mimikatz-style activity).
+
+## 4. Lateral Movement Detection
+
+- Map SMB session logs and authentication attempts across hosts to build a timeline/graph of everything the compromised account touched.
+- Correlate PowerShell execution logs (script block logging, module logging) for encoded commands and remote-execution cmdlets (PsExec-like behavior, WMI, WinRM).
+- Identify "patient zero" versus subsequent hops using timestamps — the earliest anomalous authentication is the likely entry point.
+- Flag any other hosts showing the `encryptsvc.exe` process or similar SMB surge patterns for immediate isolation.
+
+## 5. Backup Integrity Verification
+
+- Never restore directly from the primary backup without verification — check backup timestamps against the earliest indicator of compromise (IOC) to confirm backups predate infection.
+- Restore to an isolated sandbox/clean network segment first, scan with updated AV/EDR signatures, and validate file hashes against known-good baselines where available.
+- Review backup logs for signs of tampering — since shadow copies were deleted, assume backups may also have been targeted.
+- Prefer immutable or air-gapped backup copies over the primary backup store if they exist.
+
+## 6. Clean Recovery Workflow
+
+- Recovery order: identity/IAM integrity confirmed → network segment isolation confirmed → clean backup validated → restore to isolated environment → gradual reconnection once monitoring shows no re-encryption behavior.
+- Use phased reintroduction: bring the file server back on a monitored VLAN first, watch for anomalous processes/traffic for a defined window (e.g., 24–48 hours) before full production reconnection.
+
+## 7. Safe System Restoration
+
+- Rebuild trust from the identity layer up: reset all potentially compromised credentials (not just `svc-backup-admin`), rotate service account keys, and consider a `krbtgt` reset if domain-level compromise is suspected.
+- Reapply patches and hardening before reconnecting to the production network — do not restore into the same vulnerable state.
+- "Live recovery, not rebuild" is honored by restoring verified-clean backups onto the existing validated OS/hardware rather than full reimaging — but only once malware persistence artifacts are confirmed removed.
+
+> **Tradeoff:** Live recovery is faster and less disruptive than a full rebuild, but it carries residual risk if persistence mechanisms are missed — this is why persistence verification is a hard gate before reconnection.
+
+## 8. Evidence Preservation
+
+- Capture memory and disk images before any remediation that alters system state — ideally in parallel with containment, not after.
+- Preserve logs (SIEM, EDR, authentication, SMB/network capture) with hash values to maintain chain of custody for regulatory and legal purposes.
+- Document every action taken with timestamps — this supports both the investigation and regulatory reporting obligations.
+
+## 9. Communication and Escalation Plan
+
+- Immediate: notify the incident response lead, CISO, and legal/compliance, given the active regulatory reporting clock.
+- Parallel: notify affected business stakeholders with an estimated containment timeline, without over-promising recovery time.
+- Regulatory: have legal/compliance assess breach notification obligations (e.g., GDPR 72-hour rule, sector-specific rules) based on confirmed data exposure, not assumptions.
+- Limit broad internal/public communication until scope is understood, to avoid tipping off a potential insider threat.
+
+## 10. Post-Recovery Hardening
+
+- Enforce MFA on all privileged and service accounts, especially backup admin accounts.
+- Implement least privilege and just-in-time access for service accounts such as `svc-backup-admin`.
+- Enable immutable (write-once) backups and maintain offline/air-gapped copies going forward.
+- Deploy SMB traffic anomaly detection and restrict SMBv1; tighten lateral movement paths through default network segmentation.
+- Conduct a full post-incident review and update the incident response playbook with lessons learned.
+
+---
+
+*End of Document*
